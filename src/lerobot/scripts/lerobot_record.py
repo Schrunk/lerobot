@@ -91,8 +91,13 @@ lerobot-record \\
 
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from pprint import pformat
+
+from huggingface_hub.errors import HFValidationError
+from huggingface_hub.utils import validate_repo_id
 
 from lerobot.cameras import CameraConfig  # noqa: F401
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
@@ -160,6 +165,7 @@ from lerobot.utils.cycle_timer import CycleTimer
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.keyboard_input import init_keyboard_listener
+from lerobot.utils.motor_telemetry import MotorTelemetry
 from lerobot.utils.utils import (
     init_logging,
     log_say,
@@ -192,6 +198,14 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Also record a second dataset, named `<repo_id><current_dataset_suffix>`, with the same frames
+    # plus the current of every motor (in mA) in `observation.state`, after the joint positions, as
+    # "<motor>.current" (e.g. "shoulder_pan.current"). The main dataset keeps the plain 6-DoF state.
+    # The current is read from the motor bus in every frame.
+    record_motor_current: bool = True
+    # Suffix of the dataset with motor current. Note: "+" is not allowed in Hugging Face Hub repo ids,
+    # so with the default suffix that dataset is only stored locally (push_to_hub skips it).
+    current_dataset_suffix: str = "+current"
 
     def __post_init__(self):
         if self.teleop is None:
@@ -250,6 +264,8 @@ def record_loop(
     display_mode: str = "rerun",
     display_compressed_images: bool = False,
     timer: CycleTimer | None = None,
+    motor_current: MotorTelemetry | None = None,
+    current_dataset: LeRobotDataset | None = None,
 ) -> None:
     """Drive the robot from the teleoperator at *fps*, optionally recording each frame.
 
@@ -259,9 +275,17 @@ def record_loop(
     statistics span the whole session and are reported per episode.  Without it each
     call gets a private timer: identical pacing and identical slow-loop warnings, just
     no end-of-run summary, since a single phase has no run to summarise.
+
+    *motor_current*, if given, is read every frame and its values ("<motor>.current", in mA)
+    are added to the raw robot observation. *current_dataset* gets the same frames as *dataset*,
+    but with its own features, so the currents end up in its ``observation.state`` (while
+    *dataset*, whose features don't list them, keeps the plain joint state).
     """
-    if dataset is not None and dataset.fps != fps:
-        raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+    for ds in (dataset, current_dataset):
+        if ds is not None and ds.fps != fps:
+            raise ValueError(f"The dataset fps should be equal to requested fps ({ds.fps} != {fps}).")
+    if current_dataset is not None and dataset is None:
+        raise ValueError("`current_dataset` is only recorded together with `dataset`.")
     if control_time_s is None:
         raise ValueError("`control_time_s` is required: it is how long the loop runs.")
 
@@ -295,6 +319,8 @@ def record_loop(
     if timer is None:
         timer = CycleTimer(fps, records_data=dataset is not None)
 
+    current_keys = list(motor_current.observation_features()) if motor_current is not None else []
+
     no_action_count = 0
     timestamp = 0.0
     start_episode_t = time.perf_counter()
@@ -311,12 +337,21 @@ def record_loop(
             # Get robot observation
             obs = robot.get_observation()
 
+            if motor_current is not None:
+                current_obs = MotorTelemetry.as_observation(motor_current.read())
+                # A motor whose current could never be read yet gets 0, so the frame stays complete.
+                obs = {**obs, **{k: current_obs.get(k, 0.0) for k in current_keys}}
+
         with timer.section("process_obs"):
             # Applies a pipeline to the raw robot observation, default is IdentityProcessor
             obs_processed = robot_observation_processor(obs)
 
             if dataset is not None:
                 observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+            if current_dataset is not None:
+                current_observation_frame = build_dataset_frame(
+                    current_dataset.features, obs_processed, prefix=OBS_STR
+                )
 
         with timer.section("teleop"):
             # Get action from teleop
@@ -371,6 +406,11 @@ def record_loop(
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 frame = {**observation_frame, **action_frame, "task": single_task}
                 dataset.add_frame(frame)
+                if current_dataset is not None:
+                    # A new dict: `add_frame` pops "task" from the frame it is given.
+                    current_dataset.add_frame(
+                        {**current_observation_frame, **action_frame, "task": single_task}
+                    )
 
         if display_data:
             with timer.section("telemetry"):
@@ -424,22 +464,39 @@ def record(
         robot_action_processor = robot_action_processor or _r
         robot_observation_processor = robot_observation_processor or _o
 
-    dataset_features = combine_feature_dicts(
-        aggregate_pipeline_dataset_features(
-            pipeline=teleop_action_processor,
-            initial_features=create_initial_features(
-                action=robot.action_features
-            ),  # TODO(steven, pepijn): in future this should be come from teleop or policy
-            use_videos=cfg.dataset.video,
-        ),
-        aggregate_pipeline_dataset_features(
-            pipeline=robot_observation_processor,
-            initial_features=create_initial_features(observation=robot.observation_features),
-            use_videos=cfg.dataset.video,
-        ),
-    )
+    def make_features(observation_features: dict) -> dict:
+        return combine_feature_dicts(
+            aggregate_pipeline_dataset_features(
+                pipeline=teleop_action_processor,
+                initial_features=create_initial_features(
+                    action=robot.action_features
+                ),  # TODO(steven, pepijn): in future this should be come from teleop or policy
+                use_videos=cfg.dataset.video,
+            ),
+            aggregate_pipeline_dataset_features(
+                pipeline=robot_observation_processor,
+                initial_features=create_initial_features(observation=observation_features),
+                use_videos=cfg.dataset.video,
+            ),
+        )
+
+    dataset_features = make_features(robot.observation_features)
+
+    # Motor current, read every frame (rate 0), only for the second "+current" dataset.
+    motor_current = None
+    current_dataset_features = None
+    if cfg.record_motor_current:
+        motor_current = MotorTelemetry(robot, rate_hz=0, quantities=("current",))
+        current_features = motor_current.observation_features()
+        if current_features:
+            current_dataset_features = make_features({**robot.observation_features, **current_features})
+            logging.info(f"Recording motor current in the second dataset: {list(current_features)}")
+        else:
+            logging.warning("record_motor_current: the robot has no motor with a current register.")
+            motor_current = None
 
     dataset = None
+    current_dataset = None
     listener = None
     # One timer for the whole session, so its statistics describe the recording rather
     # than one episode's slice of it.  The reset phases below deliberately run on their
@@ -447,24 +504,45 @@ def record(
     # every number that answers "did I record at `fps`?".
     timer = CycleTimer(cfg.dataset.fps)
 
+    def current_repo_and_root() -> tuple[str, Path | None]:
+        """Name and local root of the "+current" dataset, next to the main one."""
+        suffix = cfg.current_dataset_suffix
+        root = Path(f"{cfg.dataset.root}{suffix}") if cfg.dataset.root is not None else None
+        return f"{cfg.dataset.repo_id}{suffix}", root
+
     try:
         if cfg.resume:
             num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
-            dataset = LeRobotDataset.resume(
-                cfg.dataset.repo_id,
-                root=cfg.dataset.root,
-                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-                rgb_encoder=cfg.dataset.rgb_encoder,
-                depth_encoder=cfg.dataset.depth_encoder,
-                encoder_threads=cfg.dataset.encoder_threads,
-                streaming_encoding=cfg.dataset.streaming_encoding,
-                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
-                image_writer_processes=cfg.dataset.num_image_writer_processes if num_cameras > 0 else 0,
-                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras
-                if num_cameras > 0
-                else 0,
-            )
+
+            def resume(repo_id: str, root: str | Path | None) -> LeRobotDataset:
+                return LeRobotDataset.resume(
+                    repo_id,
+                    root=root,
+                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                    rgb_encoder=cfg.dataset.rgb_encoder,
+                    depth_encoder=cfg.dataset.depth_encoder,
+                    encoder_threads=cfg.dataset.encoder_threads,
+                    streaming_encoding=cfg.dataset.streaming_encoding,
+                    encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                    image_writer_processes=cfg.dataset.num_image_writer_processes if num_cameras > 0 else 0,
+                    image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras
+                    if num_cameras > 0
+                    else 0,
+                )
+
+            dataset = resume(cfg.dataset.repo_id, cfg.dataset.root)
             sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
+            if current_dataset_features is not None:
+                current_repo_id, current_root = current_repo_and_root()
+                current_dataset = resume(current_repo_id, current_root)
+                sanity_check_dataset_robot_compatibility(
+                    current_dataset, robot, cfg.dataset.fps, current_dataset_features
+                )
+                if current_dataset.num_episodes != dataset.num_episodes:
+                    raise ValueError(
+                        f"'{current_repo_id}' has {current_dataset.num_episodes} episodes but "
+                        f"'{cfg.dataset.repo_id}' has {dataset.num_episodes}, they must match to resume both."
+                    )
         else:
             # Reject eval_ prefix — for policy evaluation use lerobot-rollout
             repo_name = cfg.dataset.repo_id.split("/", 1)[-1]
@@ -475,21 +553,34 @@ def record(
                 )
             cfg.dataset.stamp_repo_id()
             num_cameras = len(robot.cameras)  # type: ignore[attr-defined]
-            dataset = LeRobotDataset.create(
-                cfg.dataset.repo_id,
-                cfg.dataset.fps,
-                root=cfg.dataset.root,
-                robot_type=robot.robot_type,
-                features=dataset_features,
-                use_videos=cfg.dataset.video,
-                image_writer_processes=cfg.dataset.num_image_writer_processes,
-                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras,
-                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-                rgb_encoder=cfg.dataset.rgb_encoder,
-                depth_encoder=cfg.dataset.depth_encoder,
-                encoder_threads=cfg.dataset.encoder_threads,
-                streaming_encoding=cfg.dataset.streaming_encoding,
-                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+
+            def create(repo_id: str, root: str | Path | None, features: dict) -> LeRobotDataset:
+                return LeRobotDataset.create(
+                    repo_id,
+                    cfg.dataset.fps,
+                    root=root,
+                    robot_type=robot.robot_type,
+                    features=features,
+                    use_videos=cfg.dataset.video,
+                    image_writer_processes=cfg.dataset.num_image_writer_processes,
+                    image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras,
+                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                    rgb_encoder=cfg.dataset.rgb_encoder,
+                    depth_encoder=cfg.dataset.depth_encoder,
+                    encoder_threads=cfg.dataset.encoder_threads,
+                    streaming_encoding=cfg.dataset.streaming_encoding,
+                    encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                )
+
+            dataset = create(cfg.dataset.repo_id, cfg.dataset.root, dataset_features)
+            if current_dataset_features is not None:
+                current_repo_id, current_root = current_repo_and_root()
+                current_dataset = create(current_repo_id, current_root, current_dataset_features)
+
+        datasets = [ds for ds in (dataset, current_dataset) if ds is not None]
+        for ds in datasets:
+            logging.info(
+                f"Recording to '{ds.repo_id}' at {ds.root}, observation.state = {ds.features['observation.state']['names']}"
             )
 
         # Connect the teleoperator before the robot so the robot isn't left idle (and possibly
@@ -505,7 +596,9 @@ def record(
                 "Streaming encoding is disabled. If you have capable hardware, consider enabling it for way faster episode saving. --dataset.streaming_encoding=true --dataset.encoder_threads=2 # --dataset.rgb_encoder.vcodec=auto. More info in the documentation: https://huggingface.co/docs/lerobot/streaming_video_encoding"
             )
 
-        with VideoEncodingManager(dataset):
+        with ExitStack() as stack:
+            for ds in datasets:
+                stack.enter_context(VideoEncodingManager(ds))
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 episode_index = dataset.num_episodes
@@ -520,12 +613,14 @@ def record(
                     robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
                     dataset=dataset,
+                    current_dataset=current_dataset,
                     control_time_s=cfg.dataset.episode_time_s,
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_mode=cfg.display_mode,
                     display_compressed_images=display_compressed_images,
                     timer=timer,
+                    motor_current=motor_current,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -548,18 +643,21 @@ def record(
                         display_data=cfg.display_data,
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,
+                        motor_current=motor_current,
                     )
 
                 if events["rerecord_episode"]:
                     log_say("Re-record episode", cfg.play_sounds)
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
-                    dataset.clear_episode_buffer()
+                    for ds in datasets:
+                        ds.clear_episode_buffer()
                     timer.log_episode_summary("discarded episode")
                     timer.restart()
                     continue
 
-                dataset.save_episode()
+                for ds in datasets:
+                    ds.save_episode()
                 recorded_episodes += 1
                 # Close the window on the episode just saved.  The digest is emitted on
                 # the next episode's first tick, so the reset phase, `save_episode` and
@@ -575,8 +673,9 @@ def record(
 
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
-        if dataset:
-            dataset.finalize()
+        for ds in (dataset, current_dataset):
+            if ds:
+                ds.finalize()
 
         if robot.is_connected:
             robot.disconnect()
@@ -590,10 +689,21 @@ def record(
             shutdown_visualization(cfg.display_mode)
 
         if cfg.dataset.push_to_hub:
-            if dataset and dataset.num_episodes > 0:
-                dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
-            else:
-                logging.warning("No episodes saved — skipping push to hub")
+            for ds in (dataset, current_dataset):
+                if not ds:
+                    continue
+                if ds.num_episodes == 0:
+                    logging.warning(f"No episodes saved in '{ds.repo_id}' — skipping push to hub")
+                    continue
+                try:
+                    validate_repo_id(ds.repo_id)
+                except HFValidationError:
+                    logging.warning(
+                        f"'{ds.repo_id}' is not a valid Hugging Face Hub repo id — it is only stored locally "
+                        f"at {ds.root}. Use e.g. --current_dataset_suffix=_current to push it too."
+                    )
+                    continue
+                ds.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
         log_say("Exiting", cfg.play_sounds)
     return dataset

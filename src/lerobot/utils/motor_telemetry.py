@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Read the load, current and temperature of a robot's serial-bus motors for live display."""
+"""Read the load, current and temperature of a robot's serial-bus motors (for display and recording)."""
 
 import logging
 import time
@@ -59,16 +59,28 @@ class MotorTelemetry:
     without slowing the loop down more than `rate_hz` allows.
     """
 
-    def __init__(self, robot: object, rate_hz: float = 10.0):
+    def __init__(self, robot: object, rate_hz: float = 10.0, quantities: tuple[str, ...] | None = None):
+        """
+        Args:
+            robot: The robot whose motor buses are read. It does not have to be connected yet.
+            rate_hz: Maximum read rate. 0 reads on every `read()` call (needed for recording).
+            quantities: Subset of `TELEMETRY_REGISTERS` to read, default all of them.
+        """
         self.buses = find_motor_buses(robot)
+        self.quantities = tuple(quantities) if quantities is not None else tuple(TELEMETRY_REGISTERS)
+        unknown = set(self.quantities) - set(TELEMETRY_REGISTERS)
+        if unknown:
+            raise ValueError(
+                f"Unknown motor telemetry quantities {unknown}, use {list(TELEMETRY_REGISTERS)}."
+            )
         self.period = 1.0 / rate_hz if rate_hz > 0 else 0.0
         self._last_read = -float("inf")
         self._values: dict[str, dict[str, float]] = {}
         # Per bus, per quantity: the motors that have the register.
         self._motors: dict[str, dict[str, list[str]]] = {
             prefix: {
-                q: [m for m in bus.motors if bus._has_register(m, reg)]
-                for q, (reg, _) in TELEMETRY_REGISTERS.items()
+                q: [m for m in bus.motors if bus._has_register(m, TELEMETRY_REGISTERS[q][0])]
+                for q in self.quantities
             }
             for prefix, bus in self.buses.items()
         }
@@ -90,9 +102,11 @@ class MotorTelemetry:
             return self._values
         self._last_read = now
 
-        values: dict[str, dict[str, float]] = {}
+        # Start from the last values, so a failed read keeps the previous value instead of dropping the key.
+        values: dict[str, dict[str, float]] = {m: dict(qs) for m, qs in self._values.items()}
         for prefix, bus in self.buses.items():
-            for q, (reg, _) in TELEMETRY_REGISTERS.items():
+            for q in self.quantities:
+                reg = TELEMETRY_REGISTERS[q][0]
                 motors = self._motors[prefix][q]
                 if not motors:
                     continue
@@ -107,6 +121,15 @@ class MotorTelemetry:
                     values.setdefault(f"{prefix}{m}", {})[q] = float(v) * scale
         self._values = values
         return values
+
+    def observation_features(self) -> dict[str, type]:
+        """The keys `as_observation(read())` returns, as robot-style features, e.g. {"shoulder_pan.current": float}."""
+        return {
+            f"{prefix}{m}.{q}": float
+            for prefix in self.buses
+            for q in self.quantities
+            for m in self._motors[prefix][q]
+        }
 
     @staticmethod
     def as_observation(values: dict[str, dict[str, float]]) -> dict[str, float]:
