@@ -83,6 +83,10 @@ def shutdown_rerun() -> None:
     rr.rerun_shutdown()
 
 
+# Observation key suffix -> name of its own time-series view (see `lerobot.utils.motor_telemetry`).
+_TELEMETRY_VIEWS = {"load": "motor load [%]", "current": "motor current [mA]", "temperature": "motor temperature [°C]"}
+
+
 def _build_blueprint(
     observation_paths: set[str],
     action_paths: set[str],
@@ -100,8 +104,20 @@ def _build_blueprint(
 
     views = [rrb.Spatial2DView(origin=path, name=path) for path in sorted(image_paths)]
 
-    if observation_paths:
-        views.append(rrb.TimeSeriesView(name="observation", contents=sorted(observation_paths)))
+    # Motor telemetry (e.g. "observation.shoulder_pan.load") gets one view per quantity, as its
+    # units differ from each other and from the joint positions.
+    telemetry_paths: dict[str, list[str]] = {}
+    for path in sorted(observation_paths):
+        quantity = path.rsplit(".", 1)[-1]
+        if quantity in _TELEMETRY_VIEWS:
+            telemetry_paths.setdefault(quantity, []).append(path)
+    other_paths = sorted(set(observation_paths) - {p for ps in telemetry_paths.values() for p in ps})
+
+    if other_paths:
+        views.append(rrb.TimeSeriesView(name="observation", contents=other_paths))
+    for quantity, name in _TELEMETRY_VIEWS.items():
+        if quantity in telemetry_paths:
+            views.append(rrb.TimeSeriesView(name=name, contents=telemetry_paths[quantity]))
     if action_paths:
         views.append(rrb.TimeSeriesView(name="action", contents=sorted(action_paths)))
     views += [rrb.TextDocumentView(origin=path, name=path) for path in sorted(text_paths)]

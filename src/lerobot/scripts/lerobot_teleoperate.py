@@ -127,6 +127,7 @@ from lerobot.teleoperators import (  # noqa: F401
 )
 from lerobot.utils.cycle_timer import CycleTimer
 from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.motor_telemetry import MotorTelemetry
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import (
     init_visualization,
@@ -154,6 +155,10 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
+    # With display_data: also show the load, current and temperature of every motor.
+    display_motor_telemetry: bool = True
+    # How often the motor telemetry is read, in Hz. Each read costs a few ms of bus time.
+    motor_telemetry_fps: float = 10.0
 
 
 def teleop_loop(
@@ -167,6 +172,7 @@ def teleop_loop(
     display_mode: str = "rerun",
     duration: float | None = None,
     display_compressed_images: bool = False,
+    motor_telemetry: MotorTelemetry | None = None,
 ):
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
@@ -185,6 +191,8 @@ def teleop_loop(
         teleop_action_processor: An optional pipeline to process raw actions from the teleoperator.
         robot_action_processor: An optional pipeline to process actions before they are sent to the robot.
         robot_observation_processor: An optional pipeline to process raw observations from the robot.
+        motor_telemetry: If given (with display_data), the load, current and temperature of the motors
+            are shown in the console table and logged to the visualization backend.
     """
 
     display_len = max(len(key) for key in robot.action_features)
@@ -232,6 +240,10 @@ def teleop_loop(
                     # Process robot observation through pipeline
                     obs_transition = robot_observation_processor(obs)
 
+                    telemetry = motor_telemetry.read() if motor_telemetry is not None else {}
+                    if telemetry:
+                        obs_transition = {**obs_transition, **MotorTelemetry.as_observation(telemetry)}
+
                     log_visualization_data(
                         display_mode,
                         observation=obs_transition,
@@ -239,11 +251,21 @@ def teleop_loop(
                         compress_images=display_compressed_images,
                     )
 
-                    print("\n" + "-" * (display_len + 10))
-                    print(f"{'NAME':<{display_len}} | {'NORM':>7}")
-                    # Display the final robot action that was sent
+                    header = f"{'NAME':<{display_len}} | {'NORM':>7}"
+                    if telemetry:
+                        header += f" | {'LOAD %':>7} | {'CURR mA':>7} | {'TEMP °C':>7}"
+                    print("\n" + "-" * len(header))
+                    print(header)
+                    # Display the final robot action that was sent, and the motor telemetry
                     for motor, value in robot_action_to_send.items():
-                        print(f"{motor:<{display_len}} | {value:>7.2f}")
+                        line = f"{motor:<{display_len}} | {value:>7.2f}"
+                        if telemetry:
+                            t = telemetry.get(motor.removesuffix(".pos"), {})
+                            line += "".join(
+                                f" | {t[q]:>7.1f}" if q in t else f" | {'-':>7}"
+                                for q in ("load", "current", "temperature")
+                            )
+                        print(line)
                     move_cursor_up(len(robot_action_to_send) + 3)
 
             timer.wait()
@@ -280,6 +302,12 @@ def teleoperate(cfg: TeleoperateConfig):
     teleop.connect()
     robot.connect()
 
+    motor_telemetry = None
+    if cfg.display_data and cfg.display_motor_telemetry:
+        motor_telemetry = MotorTelemetry(robot, rate_hz=cfg.motor_telemetry_fps)
+        if not motor_telemetry.available:
+            motor_telemetry = None
+
     try:
         teleop_loop(
             teleop=teleop,
@@ -292,6 +320,7 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            motor_telemetry=motor_telemetry,
         )
     except KeyboardInterrupt:
         pass
