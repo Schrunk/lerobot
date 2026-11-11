@@ -1,0 +1,73 @@
+{
+  "env": {
+    "name": "real_robot",
+    "fps": 10,
+    "processor": {
+      "control_mode": "leader",
+      "observation": {
+        "display_cameras": true
+      },
+      "image_preprocessing": {
+        "resize_size": [128, 128]
+      },
+      "gripper": {
+        "use_gripper": true
+      },
+      "reset": {
+        "reset_time_s": 10.0,
+        "control_time_s": 20.0
+      },
+      "inverse_kinematics": {
+        "urdf_path": "rl/so101_new_calib_camera.urdf",
+        "target_frame_name": "gripper",
+        "end_effector_bounds": {
+          "min": [-0.0157, -0.1214, -0.0011],
+          "max": [0.4002, 0.0997, 0.4229]
+        },
+        "end_effector_step_sizes": {
+          "x": 0.02,
+          "y": 0.02,
+          "z": 0.02
+        }
+      }
+    },
+    "robot": {
+      "type": "so101_follower",
+      "port": "/dev/ttyACM1",
+      "id": "so101_parallel",
+      "use_degrees": true,
+      "cameras": {
+        "top": {
+          "type": "opencv",
+          "index_or_path": 4,
+          "width": 640,
+          "height": 480,
+          "fps": 30
+        },
+        "wrist": {
+          "type": "opencv",
+          "index_or_path": 2,
+          "width": 640,
+          "height": 480,
+          "fps": 30
+        }
+      }
+    },
+    "teleop": {
+      "type": "so101_leader",
+      "port": "/dev/ttyACM0",
+      "id": "my_leader_arm",
+      "use_degrees": true
+    }
+  },
+  "dataset": {
+    "repo_id": "Schrunk/so101_tea_strainer_tea_dispenser_hilserl",
+    "root": null,
+    "task": "place tea strainer under tea dispenser",
+    "num_episodes_to_record": 15,
+    "replay_episode": 0,
+    "push_to_hub": true
+  },
+  "mode": "record",
+  "device": "cuda"
+}

@@ -12,6 +12,16 @@ lerobot-calibrate \
     --teleop.port=/dev/ttyACM0 \
     --teleop.id=my_leader_arm
 
+lerobot-find-joint-limits \
+  --robot.type=so101_follower \
+  --robot.port=/dev/ttyACM1 \
+  --robot.id=so101_parallel \
+  --teleop.type=so101_leader \
+  --teleop.port=/dev/ttyACM0 \
+  --teleop.id=my_leader_arm \
+  --urdf_path=rl/so101_new_calib_camera.urdf \
+  --target_frame_name=gripper
+
 lerobot-teleoperate \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM1 \
@@ -25,17 +35,19 @@ lerobot-teleoperate \
 # record data for training
 lerobot-record \
     --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0   \
-    --robot.id=my_follower_arm  \
-    --robot.cameras="{ top: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --robot.port=/dev/ttyACM1   \
+    --robot.id=so101_parallel  \
+    --robot.cameras="{ top: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --teleop.type=so101_leader  \
-    --teleop.port=/dev/ttyACM1  \
+    --teleop.port=/dev/ttyACM0  \
     --teleop.id=my_leader_arm   \
     --display_data=true         \
-    --dataset.repo_id=Schrunk/so101_FMB_green_cylinder_in_assembly_board \
-    --dataset.num_episodes=50    \
-    --dataset.single_task="pick up green cylinder and place it in the assembly board" \
-    --dataset.streaming_encoding=true  
+    --dataset.repo_id=Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
+    --dataset.num_episodes=46    \
+    --dataset.single_task="place tea strainer under tea dispenser" \
+    --dataset.streaming_encoding=true \
+    --dataset.root=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
+    --resume=true
 
 # training
 ## on HF Hardware: --job.target=XXX ## hf jobs hardware
@@ -56,13 +68,14 @@ lerobot-record \
 # --policy.use_relative_actions=true \
 # --policy.relative_exclude_joints='["gripper"]' \
 
+## smolVLA
 lerobot-train \
-    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_FMB_merged \
-    --job_name=FastWAM \
+    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004\
+    --job_name=smolVLA \
     --policy.device=cuda \
-    --policy.repo_id=Schrunk/so101_smolVLA_FMB_18000 \
-    --wandb.enable=true \
-    --steps=18000 \
+    --policy.repo_id=Schrunk/so101_smolVLA \
+    --trackio.enable=true \
+    --steps=6200 \
     --batch_size=32 \
     --policy.path=lerobot/smolVLA_base \
     --rename_map='{"observation.images.top": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}' \
@@ -137,7 +150,9 @@ lerobot-train \
 
 watch -n 0.5 nvidia-smi
 
-uv run python /home/student/Desktop/MA_Zuarbeit/02_Code/estimate_training_time.py
+# Skript zum Schätzen der Trainingszeit
+# 5...10 Epochen bei smolVLA
+uv run python scripts/estimate_training_time.py
 
 # edit dataset
 lerobot-edit-dataset \
@@ -170,25 +185,35 @@ python record_gui.py \
 # inference
 ## RTC:
 # --inference.type=rtc \
-# --inference.queue_threshold=5
-# --inference.rtc.execution_horizon=20 \
-# --inference.rtc.max_guidance_weight=5.0 \
+# --inference.rtc.mode=guided \
+# --inference.rtc.execution_horizon=10 \
+# --inference.rtc.max_guidance_weight=10.0 \
+# --inference.rtc.prefix_attention_schedule=EXP \
+# --inference.queue_threshold=30 \
+
+python examples/rtc/eval_dataset.py \
+    --policy.path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/006200/pretrained_model \
+    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
+    --rtc.execution_horizon=10 \
+    --rtc.max_guidance_weight=10.0 \
+    --device=cuda
 
 lerobot-rollout \
     --strategy.type=base \
-    --policy.path=lerobot/pi05_libero_base \
+    --policy.path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/006200/pretrained_model \
     --robot.type=so101_follower \
     --robot.id=so101_parallel \
     --robot.port=/dev/ttyACM1 \
-    --robot.cameras="{ image: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, image2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
-    --task="pick up the yellow block" \
-    --duration=180 \
+    --robot.cameras="{ camera1: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, camera2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --inference.type=rtc \
-    --inference.queue_threshold=5 \
-    --inference.rtc.execution_horizon=20 \
-    --inference.rtc.max_guidance_weight=5.0 \
-    --policy.dtype=bfloat16 \
-    --device=cuda
+    --inference.rtc.mode=guided \
+    --inference.queue_threshold=10 \
+    --inference.rtc.execution_horizon=12 \
+    --inference.rtc.max_guidance_weight=10.0 \
+    --inference.rtc.prefix_attention_schedule=EXP \
+    --duration=60 \
+    --device=cuda \
+    --task="place tea strainer under tea dispenser" 
 
 
 # async inference server and client example

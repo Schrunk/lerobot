@@ -16,14 +16,36 @@
 
 import logging
 import time
+from queue import Empty, Queue
+from typing import TYPE_CHECKING, Any
 
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+from lerobot.utils.import_utils import _pynput_available
+from lerobot.utils.keyboard_input import pynput_can_capture
 
 from ..teleoperator import Teleoperator
+from ..utils import TeleopEvents
 from .config_so_leader import SOLeaderTeleopConfig
 
+PYNPUT_AVAILABLE = _pynput_available
+if TYPE_CHECKING:
+    from pynput import keyboard
+elif PYNPUT_AVAILABLE:
+    try:
+        from pynput import keyboard
+    except Exception as e:  # installed but not importable here, e.g. no reachable X display
+        PYNPUT_AVAILABLE = False
+        logging.info("Could not import pynput keyboard backend: %s", e)
+
 logger = logging.getLogger(__name__)
+
+# Episode control keys, read by `get_teleop_events()` (e.g. in `lerobot.rl.gym_manipulator`).
+_EPISODE_KEYS_HELP = """SO leader episode controls:
+  s   : end episode with SUCCESS
+  q   : end episode with FAILURE
+  r   : discard and re-record the episode
+  Esc : end the episode and stop recording"""
 
 _HOMING_POSITION_DIAGRAM = r"""
        ╭─────┬────────────────────┬──────╮ ◉╲═════╗   ← moveable claw
@@ -69,6 +91,11 @@ class SOLeader(Teleoperator):
             },
             calibration=self.calibration,
         )
+        # Key presses from the pynput listener thread, consumed in `get_teleop_events()`.
+        self._key_queue: Queue[str] = Queue()
+        self._key_listener: Any = None
+        # Set once Esc was pressed; lets the control loop stop after the current episode.
+        self.stop_requested = False
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -92,7 +119,68 @@ class SOLeader(Teleoperator):
             self.calibrate()
 
         self.configure()
+        self._start_key_listener()
         logger.info(f"{self} connected.")
+
+    def _start_key_listener(self) -> None:
+        """Listen for the episode control keys (s, q, r, Esc) on the local keyboard."""
+        self.stop_requested = False
+        if not (PYNPUT_AVAILABLE and pynput_can_capture()):
+            logger.warning(
+                "Keyboard episode controls (s/q/r/Esc) are unavailable: pynput can only capture keys on "
+                "an X11 session (Linux), a Windows desktop or macOS with Input Monitoring granted."
+            )
+            return
+        self._key_listener = keyboard.Listener(on_press=self._on_key_press)
+        self._key_listener.start()
+        print(_EPISODE_KEYS_HELP)
+
+    def _on_key_press(self, key: Any) -> None:
+        if key == keyboard.Key.esc:
+            self._key_queue.put("esc")
+            return
+        char = getattr(key, "char", None)
+        if char in ("s", "q", "r"):
+            self._key_queue.put(char)
+
+    def get_teleop_events(self) -> dict[TeleopEvents, bool]:
+        """Return the episode control events pressed on the keyboard since the last call.
+
+        - ``s``: success (episode ends with reward 1)
+        - ``q``: failure (episode ends without success)
+        - ``r``: re-record (episode ends and is discarded)
+        - ``Esc``: episode ends without success and ``stop_requested`` is set
+
+        The leader arm itself never reports an intervention.
+        """
+        terminate_episode = False
+        success = False
+        rerecord_episode = False
+
+        while True:
+            try:
+                key = self._key_queue.get_nowait()
+            except Empty:
+                break
+            if key == "s":
+                terminate_episode = True
+                success = True
+            elif key == "q":
+                terminate_episode = True
+            elif key == "r":
+                terminate_episode = True
+                rerecord_episode = True
+            elif key == "esc":
+                logger.info("Esc pressed, stopping after this episode.")
+                terminate_episode = True
+                self.stop_requested = True
+
+        return {
+            TeleopEvents.IS_INTERVENTION: False,
+            TeleopEvents.TERMINATE_EPISODE: terminate_episode,
+            TeleopEvents.SUCCESS: success,
+            TeleopEvents.RERECORD_EPISODE: rerecord_episode,
+        }
 
     @property
     def is_calibrated(self) -> bool:
@@ -140,6 +228,9 @@ class SOLeader(Teleoperator):
 
     @check_if_not_connected
     def disconnect(self) -> None:
+        if self._key_listener is not None:
+            self._key_listener.stop()
+            self._key_listener = None
         self.bus.disconnect()
         logger.info(f"{self} disconnected.")
 

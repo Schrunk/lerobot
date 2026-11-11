@@ -758,6 +758,10 @@ def control_loop(
                         logging.info(f"Saving episode {episode_idx}")
                         dataset.save_episode()
 
+                if getattr(teleop_device, "stop_requested", False):
+                    logging.info("Stop requested from the teleoperator, ending recording.")
+                    break
+
                 # Reset for new episode
                 transition = reset_and_build_transition(env, env_processor, action_processor)
 
