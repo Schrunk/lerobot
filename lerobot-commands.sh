@@ -82,11 +82,12 @@ lerobot-train \
     --num_workers=24 
 
 lerobot-train \
-  --config_path=/home/student/lerobot_franz/outputs/train/2026-11-05/16-26-37_pi05_libero_expert/checkpoints/010000/pretrained_model \
+  --config_path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/006200/pretrained_model \
   --resume=true \
-  --steps=67000 \
-  --batch_size=4 \
-  --policy.repo_id=Schrunk/so101_Pi05_FMB_18000 
+  --steps=12000 \
+  --batch_size=32 \
+  --trackio.enable=true \
+  --policy.repo_id=Schrunk/so101_smolVLA
 
 ## --policy.type=pi05
 lerobot-train \
@@ -200,18 +201,18 @@ python examples/rtc/eval_dataset.py \
 
 lerobot-rollout \
     --strategy.type=base \
-    --policy.path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/006200/pretrained_model \
+    --policy.path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/012000/pretrained_model \
     --robot.type=so101_follower \
     --robot.id=so101_parallel \
     --robot.port=/dev/ttyACM1 \
     --robot.cameras="{ camera1: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, camera2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --inference.type=rtc \
     --inference.rtc.mode=guided \
-    --inference.queue_threshold=10 \
-    --inference.rtc.execution_horizon=12 \
+    --inference.queue_threshold=20 \
+    --inference.rtc.execution_horizon=30 \
     --inference.rtc.max_guidance_weight=10.0 \
     --inference.rtc.prefix_attention_schedule=EXP \
-    --duration=60 \
+    --duration=30 \
     --device=cuda \
     --task="place tea strainer under tea dispenser" 
 

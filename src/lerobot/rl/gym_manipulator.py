@@ -42,6 +42,7 @@ from lerobot.processor import (
     MapDeltaActionToRobotActionStep,
     MapTensorToDeltaActionDictStep,
     Numpy2TorchActionProcessorStep,
+    ProcessorStep,
     RewardClassifierProcessorStep,
     RobotActionToPolicyActionProcessorStep,
     RobotObservation,
@@ -64,6 +65,7 @@ from lerobot.robots.so_follower.robot_kinematic_processor import (
     ForwardKinematicsJointsToEEObservation,
     GripperVelocityToJoint,
     InverseKinematicsRLStep,
+    LeaderJointsToEEDeltaStep,
 )
 from lerobot.teleoperators import (
     gamepad,  # noqa: F401
@@ -483,14 +485,32 @@ def make_processors(
     env_pipeline_steps.append(AddBatchDimensionProcessorStep())
     env_pipeline_steps.append(DeviceProcessorStep(device=device))
 
-    action_pipeline_steps = [
+    use_gripper = cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False
+    action_pipeline_steps: list[ProcessorStep] = [
         AddTeleopActionAsComplimentaryDataStep(teleop_device=teleop_device),
         AddTeleopEventsAsInfoStep(teleop_device=teleop_device),
-        InterventionActionProcessorStep(
-            use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False,
-            terminate_on_success=terminate_on_success,
-        ),
     ]
+    if (
+        kinematics_solver is not None
+        and cfg.processor.inverse_kinematics is not None
+        and cfg.processor.inverse_kinematics.end_effector_step_sizes is not None
+    ):
+        # Leader arms report joint positions; express them as the end-effector deltas used below.
+        action_pipeline_steps.append(
+            LeaderJointsToEEDeltaStep(
+                kinematics=kinematics_solver,
+                motor_names=motor_names,
+                end_effector_step_sizes=cfg.processor.inverse_kinematics.end_effector_step_sizes,
+                use_gripper=use_gripper,
+                max_gripper_pos=cfg.processor.max_gripper_pos or 100.0,
+            )
+        )
+    action_pipeline_steps.append(
+        InterventionActionProcessorStep(
+            use_gripper=use_gripper,
+            terminate_on_success=terminate_on_success,
+        )
+    )
 
     # Replace InverseKinematicsProcessor with new kinematic processors
     if cfg.processor.inverse_kinematics is not None and kinematics_solver is not None:
@@ -642,9 +662,10 @@ def control_loop(
 
     dataset = None
     if cfg.mode == "record":
-        if teleop_device:
+        if teleop_device and "dtype" in teleop_device.action_features:
             action_features = teleop_device.action_features
         else:
+            # Joint-space teleops (e.g. a leader arm) are recorded as the end-effector delta action.
             action_features = {
                 "dtype": "float32",
                 "shape": (4,),

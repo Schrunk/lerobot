@@ -42,10 +42,11 @@ logger = logging.getLogger(__name__)
 
 # Episode control keys, read by `get_teleop_events()` (e.g. in `lerobot.rl.gym_manipulator`).
 _EPISODE_KEYS_HELP = """SO leader episode controls:
-  s   : end episode with SUCCESS
-  q   : end episode with FAILURE
-  r   : discard and re-record the episode
-  Esc : end the episode and stop recording"""
+  Space : toggle intervention (the follower follows the leader while it is on)
+  s     : end episode with SUCCESS
+  q     : end episode with FAILURE
+  r     : discard and re-record the episode
+  Esc   : end the episode and stop recording"""
 
 _HOMING_POSITION_DIAGRAM = r"""
        ╭─────┬────────────────────┬──────╮ ◉╲═════╗   ← moveable claw
@@ -96,6 +97,8 @@ class SOLeader(Teleoperator):
         self._key_listener: Any = None
         # Set once Esc was pressed; lets the control loop stop after the current episode.
         self.stop_requested = False
+        # Toggled with the space bar; while True the follower follows the leader.
+        self.is_intervening = False
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -125,6 +128,7 @@ class SOLeader(Teleoperator):
     def _start_key_listener(self) -> None:
         """Listen for the episode control keys (s, q, r, Esc) on the local keyboard."""
         self.stop_requested = False
+        self.is_intervening = False
         if not (PYNPUT_AVAILABLE and pynput_can_capture()):
             logger.warning(
                 "Keyboard episode controls (s/q/r/Esc) are unavailable: pynput can only capture keys on "
@@ -139,6 +143,9 @@ class SOLeader(Teleoperator):
         if key == keyboard.Key.esc:
             self._key_queue.put("esc")
             return
+        if key == keyboard.Key.space:
+            self._key_queue.put("space")
+            return
         char = getattr(key, "char", None)
         if char in ("s", "q", "r"):
             self._key_queue.put(char)
@@ -146,12 +153,13 @@ class SOLeader(Teleoperator):
     def get_teleop_events(self) -> dict[TeleopEvents, bool]:
         """Return the episode control events pressed on the keyboard since the last call.
 
+        - ``Space``: toggle intervention (reported as ``IS_INTERVENTION`` on every call while on)
         - ``s``: success (episode ends with reward 1)
         - ``q``: failure (episode ends without success)
         - ``r``: re-record (episode ends and is discarded)
         - ``Esc``: episode ends without success and ``stop_requested`` is set
 
-        The leader arm itself never reports an intervention.
+        Any episode end switches the intervention off, so each episode starts autonomously.
         """
         terminate_episode = False
         success = False
@@ -162,7 +170,10 @@ class SOLeader(Teleoperator):
                 key = self._key_queue.get_nowait()
             except Empty:
                 break
-            if key == "s":
+            if key == "space":
+                self.is_intervening = not self.is_intervening
+                print(f"Intervention {'ON: follower follows the leader' if self.is_intervening else 'OFF'}")
+            elif key == "s":
                 terminate_episode = True
                 success = True
             elif key == "q":
@@ -175,8 +186,12 @@ class SOLeader(Teleoperator):
                 terminate_episode = True
                 self.stop_requested = True
 
+        is_intervention = self.is_intervening
+        if terminate_episode:
+            self.is_intervening = False
+
         return {
-            TeleopEvents.IS_INTERVENTION: False,
+            TeleopEvents.IS_INTERVENTION: is_intervention,
             TeleopEvents.TERMINATE_EPISODE: terminate_episode,
             TeleopEvents.SUCCESS: success,
             TeleopEvents.RERECORD_EPISODE: rerecord_episode,

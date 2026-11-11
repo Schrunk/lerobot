@@ -23,6 +23,7 @@ import numpy as np
 from lerobot.configs import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.model import RobotKinematics
 from lerobot.processor import (
+    ComplementaryDataProcessorStep,
     EnvTransition,
     ObservationProcessorStep,
     ProcessorStep,
@@ -32,6 +33,7 @@ from lerobot.processor import (
     RobotObservation,
     TransitionKey,
 )
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.utils.rotation import Rotation
 
 logger = logging.getLogger(__name__)
@@ -649,3 +651,97 @@ class InverseKinematicsRLStep(ProcessorStep):
     def reset(self):
         """Resets the initial guess for the IK solver."""
         self.q_curr = None
+
+
+@ProcessorStepRegistry.register("leader_joints_to_ee_delta")
+@dataclass
+class LeaderJointsToEEDeltaStep(ComplementaryDataProcessorStep):
+    """
+    Converts a leader arm's joint positions into the end-effector delta action of the RL pipeline.
+
+    A leader arm (e.g. SO-101 leader) reports absolute joint positions (`<motor>.pos`), while the
+    HIL-SERL action pipeline expects normalized end-effector deltas (`delta_x`, `delta_y`, `delta_z`)
+    plus a discrete gripper command {0, 1, 2}. This step computes the leader's end-effector position
+    with forward kinematics and expresses it relative to the follower's reference pose, so that the
+    follower moves towards the pose shown with the leader.
+
+    The reference pose is the same one `EEReferenceAndDelta(use_ik_solution=True)` adds the delta to:
+    the last IK solution if available, otherwise the measured follower joints. Each axis is divided by
+    its `end_effector_step_sizes` entry and clipped to [-1, 1], so the follower moves at most one step
+    size per control step and keeps following until it reaches the leader pose.
+
+    Teleop actions without the leader joint keys (e.g. from a gamepad) are passed through unchanged.
+
+    Attributes:
+        kinematics: Kinematic model shared by leader and follower (same URDF).
+        motor_names: Ordered motor names expected by `kinematics`.
+        end_effector_step_sizes: Maximum displacement per step for "x", "y" and "z", in meters.
+        use_gripper: If True, add the discrete gripper command under "gripper".
+        max_gripper_pos: Gripper position limit, as `GripperVelocityToJoint.clip_max`.
+        gripper_threshold: Leader gripper position separating the two gripper states; defaults to
+            half of `max_gripper_pos`.
+        gripper_tolerance: Distance from a gripper limit at which the follower counts as arrived.
+
+    The discrete gripper command moves the follower fully towards one limit, so the leader gripper is
+    mapped onto two states (above / below `gripper_threshold`). The command is "stay" once the follower
+    has reached that state's limit, which avoids toggling around intermediate leader positions.
+    """
+
+    kinematics: RobotKinematics
+    motor_names: list[str]
+    end_effector_step_sizes: dict[str, float]
+    use_gripper: bool = True
+    max_gripper_pos: float = 100.0
+    gripper_threshold: float | None = None
+    gripper_tolerance: float = 2.0
+
+    def complementary_data(self, complementary_data: dict) -> dict:
+        teleop_action = complementary_data.get(TELEOP_ACTION_KEY)
+        if not isinstance(teleop_action, dict) or not all(
+            f"{name}.pos" in teleop_action for name in self.motor_names
+        ):
+            return complementary_data
+
+        raw_observation = self.transition.get(TransitionKey.OBSERVATION)
+        if not raw_observation:
+            raise ValueError("Joints observation is required to map leader joints to an end-effector delta")
+        q_measured = np.array(
+            [float(raw_observation[f"{name}.pos"]) for name in self.motor_names], dtype=float
+        )
+
+        q_reference = complementary_data.get("IK_solution")
+        if q_reference is None:
+            q_reference = q_measured
+        q_leader = np.array([float(teleop_action[f"{name}.pos"]) for name in self.motor_names], dtype=float)
+
+        leader_position = self.kinematics.forward_kinematics(q_leader)[:3, 3]
+        reference_position = self.kinematics.forward_kinematics(np.asarray(q_reference, dtype=float))[:3, 3]
+        step_sizes = np.array([self.end_effector_step_sizes[axis] for axis in ("x", "y", "z")], dtype=float)
+        delta = np.clip((leader_position - reference_position) / step_sizes, -1.0, 1.0)
+
+        ee_delta_action: dict[str, float] = {
+            "delta_x": float(delta[0]),
+            "delta_y": float(delta[1]),
+            "delta_z": float(delta[2]),
+        }
+        if self.use_gripper:
+            # GripperVelocityToJoint(discrete_gripper=True): 0 raises, 2 lowers the gripper position, 1 stays.
+            threshold = (
+                self.gripper_threshold if self.gripper_threshold is not None else self.max_gripper_pos / 2
+            )
+            follower_gripper = float(raw_observation["gripper.pos"])
+            if float(teleop_action["gripper.pos"]) > threshold:
+                at_limit = follower_gripper >= self.max_gripper_pos - self.gripper_tolerance
+                ee_delta_action["gripper"] = 1.0 if at_limit else 0.0
+            else:
+                at_limit = follower_gripper <= self.gripper_tolerance
+                ee_delta_action["gripper"] = 1.0 if at_limit else 2.0
+
+        new_complementary_data = dict(complementary_data)
+        new_complementary_data[TELEOP_ACTION_KEY] = ee_delta_action
+        return new_complementary_data
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
