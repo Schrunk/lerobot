@@ -70,12 +70,12 @@ lerobot-record \
 
 ## smolVLA
 lerobot-train \
-    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
+    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_mergedV0.2 \
     --job_name=smolVLA \
     --policy.device=cuda \
     --policy.repo_id=Schrunk/so101_smolVLA \
     --trackio.enable=true \
-    --steps=6000 \
+    --steps=18000 \
     --save_freq=2000 \
     --batch_size=32 \
     --policy.path=Schrunk/so101_smolVLA \
@@ -93,14 +93,13 @@ lerobot-train \
 
 ## --policy.type=pi05
 lerobot-train \
-    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_mergedV0.2 \
+    --dataset.repo_id=/home/vla/datasets/so101_mergedV0.2 \
     --policy.type=pi05 \
     --policy.pretrained_path=lerobot/pi05_base \
     --policy.normalization_mapping='{"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}' \
     --policy.n_action_steps=20 \
     --policy.empty_cameras=1 \
     --policy.freeze_vision_encoder=true \
-    --policy.train_expert_only=true \
     --policy.gradient_checkpointing=true \
     --policy.dtype=bfloat16 \
     --policy.device=cuda \
@@ -110,8 +109,30 @@ lerobot-train \
     --job_name=pi05 \
     --batch_size=4 \
     --num_workers=24 \
-    --steps=140000 \
-    --save_freq=5000
+    --steps=30000 \
+    --save_freq=2000
+
+## policy.type=flux3
+lerobot-train \
+    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_mergedV0.2 \
+    --config_path=examples/flux3/lora.json \
+    --policy.path=black-forest-labs/flux-3-action-so101 \
+    --policy.device=cuda \
+    --trackio.enable=true \
+    --rename_map='{"observation.images.top":"observation.images.scene","observation.images.gripper_cam":"observation.images.wrist"}'
+
+lerobot-rollout \
+    --strategy.type=base \
+    --policy.path=black-forest-labs/flux-3-action-so101 \
+    --robot.type=so101_follower \
+    --robot.id=so101_parallel \
+    --robot.port=/dev/ttyACM1 \
+    --robot.cameras="{ top: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --rename_map='{"observation.images.top":"observation.images.scene"}' \
+    --duration=60 \
+    --device=cuda \
+    --task="place tea strainer under the tea dispenser and fill it with tea"
+
 
 ## --policy.type=fastwam
 lerobot-train \
@@ -207,20 +228,20 @@ python examples/rtc/eval_dataset.py \
 
 lerobot-rollout \
     --strategy.type=base \
-    --policy.path=outputs/train/2026-11-12/15-16-18_pi05/checkpoints/020000/pretrained_model \
+    --policy.path=outputs/train/2026-11-13/16-21-03_smolVLA/checkpoints/006000/pretrained_model \
     --robot.type=so101_follower \
     --robot.id=so101_parallel \
     --robot.port=/dev/ttyACM1 \
-    --robot.cameras="{ top: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --robot.cameras="{ camera1: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, camera2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --inference.type=rtc \
-    --inference.rtc.mode=trained \
+    --inference.rtc.mode=guided \
     --inference.queue_threshold=30 \
     --inference.rtc.execution_horizon=10 \
     --inference.rtc.max_guidance_weight=10.0 \
     --inference.rtc.prefix_attention_schedule=EXP \
     --duration=60 \
     --device=cuda \
-    --task="place tea strainer under the tea dispenser and fill it with tea" 
+    --task="place tea strainer under the tea dispenser" 
 
 
 # async inference server and client example
