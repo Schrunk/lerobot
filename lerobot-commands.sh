@@ -42,11 +42,11 @@ lerobot-record \
     --teleop.port=/dev/ttyACM0  \
     --teleop.id=my_leader_arm   \
     --display_data=true         \
-    --dataset.repo_id=Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
-    --dataset.num_episodes=46    \
-    --dataset.single_task="place tea strainer under tea dispenser" \
+    --dataset.repo_id=Schrunk/so101_actuate_tea_dispenser_20261110_163202 \
+    --dataset.num_episodes=45    \
+    --dataset.single_task="operate the tea dispenser" \
     --dataset.streaming_encoding=true \
-    --dataset.root=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
+    --dataset.root=/home/student/.cache/huggingface/lerobot/Schrunk/so101_actuate_tea_dispenser_20261110_163202 \
     --resume=true
 
 # training
@@ -70,17 +70,19 @@ lerobot-record \
 
 ## smolVLA
 lerobot-train \
-    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004\
+    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
     --job_name=smolVLA \
     --policy.device=cuda \
     --policy.repo_id=Schrunk/so101_smolVLA \
     --trackio.enable=true \
-    --steps=6200 \
+    --steps=6000 \
+    --save_freq=2000 \
     --batch_size=32 \
-    --policy.path=lerobot/smolVLA_base \
+    --policy.path=Schrunk/so101_smolVLA \
     --rename_map='{"observation.images.top": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}' \
     --num_workers=24 
 
+## resume training
 lerobot-train \
   --config_path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/006200/pretrained_model \
   --resume=true \
@@ -91,11 +93,11 @@ lerobot-train \
 
 ## --policy.type=pi05
 lerobot-train \
-    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_FMB_merged \
+    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_mergedV0.2 \
     --policy.type=pi05 \
-    --policy.pretrained_path=/home/student/lerobot_franz/outputs/train/2026-11-05/16-26-37_pi05_libero_expert/checkpoints/010000/pretrained_model \
+    --policy.pretrained_path=lerobot/pi05_base \
     --policy.normalization_mapping='{"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}' \
-    --policy.n_action_steps=10 \
+    --policy.n_action_steps=20 \
     --policy.empty_cameras=1 \
     --policy.freeze_vision_encoder=true \
     --policy.train_expert_only=true \
@@ -103,13 +105,15 @@ lerobot-train \
     --policy.dtype=bfloat16 \
     --policy.device=cuda \
     --policy.push_to_hub=false \
-    --job_name=pi05_libero_expert \
+    --policy.rtc_training_max_delay=10 \
+    --trackio.enable=true \
+    --job_name=pi05 \
     --batch_size=4 \
     --num_workers=24 \
-    --steps=72000 \
+    --steps=140000 \
     --save_freq=5000
 
-## --polcy.type=fastwam
+## --policy.type=fastwam
 lerobot-train \
   --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_FMB_merged \
   --policy.type=fastwam \
@@ -157,9 +161,11 @@ uv run python scripts/estimate_training_time.py
 
 # edit dataset
 lerobot-edit-dataset \
-    --new_repo_id=Schrunk/so101_FMB_merged \
+    --new_repo_id=Schrunk/so101_mergedV0.2 \
     --operation.type=merge \
-    --operation.repo_ids="['Schrunk/so101_FMB_green_cylinder_in_assembly_board_20261022_162416', 'Schrunk/so101_FMB_yellow_cuboid_left_from_assembly_board_20261021_160253_old']"
+    --operation.repo_ids="['/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_cup_20261111_184415',
+                            '/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004',
+                             '/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004']"
 
 lerobot-edit-dataset \
     --repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_FMB_yellow_cuboid_left_from_assembly_board_20261021_160253_old \
@@ -201,20 +207,20 @@ python examples/rtc/eval_dataset.py \
 
 lerobot-rollout \
     --strategy.type=base \
-    --policy.path=outputs/train/2026-11-11/14-39-17_smolVLA/checkpoints/012000/pretrained_model \
+    --policy.path=outputs/train/2026-11-12/15-16-18_pi05/checkpoints/020000/pretrained_model \
     --robot.type=so101_follower \
     --robot.id=so101_parallel \
     --robot.port=/dev/ttyACM1 \
-    --robot.cameras="{ camera1: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, camera2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --robot.cameras="{ top: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --inference.type=rtc \
-    --inference.rtc.mode=guided \
-    --inference.queue_threshold=20 \
-    --inference.rtc.execution_horizon=30 \
+    --inference.rtc.mode=trained \
+    --inference.queue_threshold=30 \
+    --inference.rtc.execution_horizon=10 \
     --inference.rtc.max_guidance_weight=10.0 \
     --inference.rtc.prefix_attention_schedule=EXP \
-    --duration=30 \
+    --duration=60 \
     --device=cuda \
-    --task="place tea strainer under tea dispenser" 
+    --task="place tea strainer under the tea dispenser and fill it with tea" 
 
 
 # async inference server and client example
@@ -238,7 +244,14 @@ python -m lerobot.async_inference.robot_client \
     --aggregate_fn_name=weighted_average \
     --debug_visualize_queue_size=True
 
-
+until lerobot-train \
+  --config_path=outputs/train/2026-11-12/15-16-18_pi05/checkpoints/000100/pretrained_model \
+  --resume=true \
+  --steps=140000 \
+  --batch_size=4 \
+  --trackio.enable=true \
+  --save_freq=20000 \
+  --policy.repo_id=Schrunk/so101_Pi05; do echo "Abbruch (Exit-Code $?), Neustart in 10s..."; sleep 600; done
 
 
 
@@ -814,9 +827,3 @@ python -m lerobot.async_inference.robot_client \
                      [--sample_weighting.extra_params str] [--rename_map str]
 
 
-until lerobot-train \
-  --config_path=/home/student/lerobot_franz/outputs/train/2026-11-05/16-26-37_pi05_libero_expert/checkpoints/015000/pretrained_model \
-  --resume=true \
-  --steps=67000 \
-  --batch_size=4 \
-  --policy.repo_id=Schrunk/so101_Pi05_FMB_18000 ; do echo "Abbruch (Exit-Code $?), Neustart in 10s..."; sleep 600; done

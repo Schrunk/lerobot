@@ -202,7 +202,7 @@ class RecordConfig:
     # plus the current of every motor (in mA) in `observation.state`, after the joint positions, as
     # "<motor>.current" (e.g. "shoulder_pan.current"). The main dataset keeps the plain 6-DoF state.
     # The current is read from the motor bus in every frame.
-    record_motor_current: bool = True
+    record_motor_current: bool = False
     # Suffix of the dataset with motor current. Note: "+" is not allowed in Hugging Face Hub repo ids,
     # so with the default suffix that dataset is only stored locally (push_to_hub skips it).
     current_dataset_suffix: str = "+current"
