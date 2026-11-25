@@ -237,6 +237,15 @@ def test_rollout_config_rejects_a_multiplier_below_one(multiplier):
         RolloutConfig(robot=MockRobotConfig(), interpolation_multiplier=multiplier)
 
 
+@pytest.mark.parametrize("alpha", [0.0, -0.5, 1.5, float("nan")])
+def test_rollout_config_rejects_an_ema_alpha_outside_unit_interval(alpha):
+    from lerobot.rollout import RolloutConfig
+    from tests.mocks.mock_robot import MockRobotConfig
+
+    with pytest.raises(ValueError, match="action_ema_alpha must be in"):
+        RolloutConfig(robot=MockRobotConfig(), action_ema_alpha=alpha)
+
+
 def test_build_rollout_context_rejects_missing_policy() -> None:
     from lerobot.policies.act.configuration_act import ACTConfig
     from lerobot.rollout import RolloutConfig, build_rollout_context
@@ -691,7 +700,11 @@ def test_setup_defaults_to_starting_the_engine():
     ctx = SimpleNamespace(
         runtime=SimpleNamespace(
             cfg=SimpleNamespace(
-                interpolation_multiplier=2, interactive=False, status_interval_s=5, device="cpu"
+                interpolation_multiplier=2,
+                action_ema_alpha=1.0,
+                interactive=False,
+                status_interval_s=5,
+                device="cpu",
             )
         ),
         policy=SimpleNamespace(inference=engine),
@@ -1051,6 +1064,7 @@ def _make_loop_ctx(fps: float, multiplier: int, num_ticks: int, on_tick=None):
     cfg = SimpleNamespace(
         fps=fps,
         interpolation_multiplier=multiplier,
+        action_ema_alpha=1.0,
         duration=0.0,
         dataset=SimpleNamespace(single_task="task"),
         task="task",

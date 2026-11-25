@@ -323,6 +323,11 @@ class RolloutConfig:
     # the robot at ``fps × multiplier`` Hz while policy inference and dataset
     # recording stay at ``fps`` Hz.
     interpolation_multiplier: int = 1
+    # Low-pass (EMA) filter on the policy actions before they are interpolated and
+    # sent: ``a_t = alpha * policy_t + (1 - alpha) * a_{t-1}``.  1.0 disables the
+    # filter; smaller values (e.g. 0.3-0.7) smooth jitter but add lag.  The
+    # filtered action is what gets sent to the robot and recorded.
+    action_ema_alpha: float = 1.0
     device: str | None = None
     # TF32 in float32 matmuls and cuDNN convolutions on Ampere and newer GPUs.
     tf32: bool | None = True
@@ -361,6 +366,8 @@ class RolloutConfig:
             raise ValueError("status_interval_s must be finite and >= 0")
         if self.interpolation_multiplier < 1:
             raise ValueError(f"interpolation_multiplier must be >= 1, got {self.interpolation_multiplier}")
+        if not (math.isfinite(self.action_ema_alpha) and 0.0 < self.action_ema_alpha <= 1.0):
+            raise ValueError(f"action_ema_alpha must be in (0, 1], got {self.action_ema_alpha}")
 
         # --- Strategy capabilities ---
         # Read off the strategy's declarations, never its concrete type, so a

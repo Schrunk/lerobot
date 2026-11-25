@@ -596,3 +596,48 @@ def test_queue_interpolator_delay_skips_stale_actions():
     first_action = queue.get()
     assert first_action is not None
     torch.testing.assert_close(first_action, torch.tensor([103.0, 103.0]))
+
+
+# ====================== EMA Filter Tests ======================
+
+
+@pytest.mark.parametrize("alpha", [0.0, -0.1, 1.5])
+def test_ema_alpha_out_of_range_raises(alpha):
+    with pytest.raises(ValueError, match="ema_alpha"):
+        ActionInterpolator(ema_alpha=alpha)
+
+
+def test_ema_alpha_one_is_passthrough():
+    interp = ActionInterpolator()
+    for value in (0.0, 10.0, -5.0):
+        interp.add(torch.tensor([value]))
+        torch.testing.assert_close(interp.get(), torch.tensor([value]))
+
+
+def test_ema_filters_policy_actions():
+    interp = ActionInterpolator(ema_alpha=0.5)
+    interp.add(torch.tensor([0.0, 2.0]))
+    torch.testing.assert_close(interp.get(), torch.tensor([0.0, 2.0]))  # first action passes unchanged
+    interp.add(torch.tensor([10.0, 2.0]))
+    torch.testing.assert_close(interp.get(), torch.tensor([5.0, 2.0]))
+    interp.add(torch.tensor([10.0, 2.0]))
+    torch.testing.assert_close(interp.get(), torch.tensor([7.5, 2.0]))
+
+
+def test_ema_interpolates_towards_filtered_action():
+    interp = ActionInterpolator(multiplier=2, ema_alpha=0.5)
+    interp.add(torch.tensor([0.0]))
+    interp.get()
+    interp.add(torch.tensor([8.0]))
+    torch.testing.assert_close(interp.get(), torch.tensor([2.0]))
+    torch.testing.assert_close(interp.get(), torch.tensor([4.0]))
+    assert interp.emitted_policy_action
+
+
+def test_ema_restarts_after_reset():
+    interp = ActionInterpolator(ema_alpha=0.2)
+    interp.add(torch.tensor([0.0]))
+    interp.get()
+    interp.reset()
+    interp.add(torch.tensor([10.0]))
+    torch.testing.assert_close(interp.get(), torch.tensor([10.0]))

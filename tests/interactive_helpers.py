@@ -88,6 +88,7 @@ def _loop_ctx(engine, robot=None, stop_event=None, **cfg_overrides):
         "duration": 0.0,
         "use_torch_compile": False,
         "interpolation_multiplier": 1,
+        "action_ema_alpha": 1.0,
         "interactive": True,
         "status_interval_s": 5.0,
         "device": "cpu",

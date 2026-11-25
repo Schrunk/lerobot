@@ -37,16 +37,16 @@ lerobot-record \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM1   \
     --robot.id=so101_parallel  \
-    --robot.cameras="{ top: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --robot.cameras="{ top: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30} }" \
     --teleop.type=so101_leader  \
     --teleop.port=/dev/ttyACM0  \
     --teleop.id=my_leader_arm   \
     --display_data=true         \
-    --dataset.repo_id=Schrunk/so101_actuate_tea_dispenser_20261110_163202 \
-    --dataset.num_episodes=45    \
-    --dataset.single_task="operate the tea dispenser" \
+    --dataset.repo_id=Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
+    --dataset.num_episodes=8    \
+    --dataset.single_task="place tea strainer under tea dispenser" \
     --dataset.streaming_encoding=true \
-    --dataset.root=/home/student/.cache/huggingface/lerobot/Schrunk/so101_actuate_tea_dispenser_20261110_163202 \
+    --dataset.root=/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004 \
     --resume=true
 
 # training
@@ -69,16 +69,17 @@ lerobot-record \
 # --policy.relative_exclude_joints='["gripper"]' \
 
 ## smolVLA
+# standard repo lerobot/smolVLA_base
 lerobot-train \
-    --dataset.repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_mergedV0.2 \
+    --dataset.repo_id=Schrunk/so101__tea_strainer2tea_dispenser_real_sim \
     --job_name=smolVLA \
     --policy.device=cuda \
-    --policy.repo_id=Schrunk/so101_smolVLA \
+    --policy.repo_id=Schrunk/so101_smolVLA_rs  \
     --trackio.enable=true \
     --steps=18000 \
-    --save_freq=2000 \
+    --save_freq=4000 \
     --batch_size=32 \
-    --policy.path=Schrunk/so101_smolVLA \
+    --policy.path=lerobot/smolVLA_base  \
     --rename_map='{"observation.images.top": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}' \
     --num_workers=24 
 
@@ -182,11 +183,11 @@ uv run python scripts/estimate_training_time.py
 
 # edit dataset
 lerobot-edit-dataset \
-    --new_repo_id=Schrunk/so101_mergedV0.2 \
+    --new_repo_id=Schrunk/so101__tea_strainer2tea_dispenser_real_sim \
     --operation.type=merge \
-    --operation.repo_ids="['/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_cup_20261111_184415',
-                            '/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004',
-                             '/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004']"
+    --operation.repo_ids="['Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004', 'Schrunk/tea_strainer2tea_dispenser_real']" \
+    --operation.roots="['/home/student/.cache/huggingface/lerobot/Schrunk/so101_tea_strainer_tea_dispenser_20261111_114004',
+                            '/home/student/lehome/Datasets/tea_strainer2tea_dispenser_real/002']"
 
 lerobot-edit-dataset \
     --repo_id=/home/student/.cache/huggingface/lerobot/Schrunk/so101_FMB_yellow_cuboid_left_from_assembly_board_20261021_160253_old \
@@ -228,20 +229,46 @@ python examples/rtc/eval_dataset.py \
 
 lerobot-rollout \
     --strategy.type=base \
-    --policy.path=outputs/train/2026-11-13/16-21-03_smolVLA/checkpoints/006000/pretrained_model \
+    --policy.path=outputs/train/2026-11-13/16-21-03_smolVLA/checkpoints/018000/pretrained_model \
     --robot.type=so101_follower \
     --robot.id=so101_parallel \
     --robot.port=/dev/ttyACM1 \
     --robot.cameras="{ camera1: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, camera2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --inference.type=rtc \
     --inference.rtc.mode=guided \
-    --inference.queue_threshold=30 \
-    --inference.rtc.execution_horizon=10 \
-    --inference.rtc.max_guidance_weight=10.0 \
+    --inference.queue_threshold=40 \
+    --inference.rtc.execution_horizon=20 \
+    --inference.rtc.max_guidance_weight=5.0 \
     --inference.rtc.prefix_attention_schedule=EXP \
     --duration=60 \
     --device=cuda \
+    --interpolation_multiplier=3 \
     --task="place tea strainer under the tea dispenser" 
+
+## HIL command
+lerobot-rollout \
+    --strategy.type=dagger \
+    --policy.path=outputs/train/2026-11-13/16-21-03_smolVLA/checkpoints/018000/pretrained_model \
+    --dataset.repo_id=Schrunk/rollout_so101_tea_strainer_tea_dispenser \
+    --dataset.single_task="place tea strainer under the tea dispenser" \
+    --dataset.fps=30 \
+    --robot.type=so101_follower \
+    --robot.id=so101_parallel \
+    --robot.port=/dev/ttyACM1 \
+    --robot.cameras="{ camera1: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, camera2: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --teleop.type=so101_leader  \
+    --teleop.port=/dev/ttyACM0  \
+    --teleop.id=my_leader_arm   \
+    --inference.type=rtc \
+    --inference.rtc.mode=guided \
+    --inference.queue_threshold=40 \
+    --inference.rtc.execution_horizon=23 \
+    --inference.rtc.max_guidance_weight=5.0 \
+    --inference.rtc.prefix_attention_schedule=LINEAR \
+    --device=cuda \
+    --task="place tea strainer under the tea dispenser" \
+    --interpolation_multiplier=3 \
+    --action_ema_alpha=1 \
 
 
 # async inference server and client example
@@ -273,6 +300,13 @@ until lerobot-train \
   --trackio.enable=true \
   --save_freq=20000 \
   --policy.repo_id=Schrunk/so101_Pi05; do echo "Abbruch (Exit-Code $?), Neustart in 10s..."; sleep 600; done
+
+python -m scripts.dataset_sim record \
+    --task LeHome-SO101-Direct-loftwater-v0 \
+    --teleop_device so101leader \
+    --port /dev/ttyACM0 \
+    --device cpu \
+    --enable_cameras
 
 
 

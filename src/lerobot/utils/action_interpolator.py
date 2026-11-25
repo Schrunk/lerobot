@@ -51,15 +51,22 @@ class ActionInterpolator:
             dataset.add_frame(...)
     """
 
-    def __init__(self, multiplier: int = 1):
+    def __init__(self, multiplier: int = 1, ema_alpha: float = 1.0):
         """Initialize the interpolator.
 
         Args:
             multiplier: Control rate multiplier (1 = no interpolation, 2 = 2x, 3 = 3x, etc.)
+            ema_alpha: Smoothing factor of an exponential moving average (first-order
+                low-pass filter) applied to each policy action before interpolation:
+                ``y_t = alpha * x_t + (1 - alpha) * y_{t-1}``.  ``1.0`` disables the
+                filter; smaller values smooth more but add lag.  Must be in ``(0, 1]``.
         """
         if multiplier < 1:
             raise ValueError(f"multiplier must be >= 1, got {multiplier}")
+        if not 0.0 < ema_alpha <= 1.0:
+            raise ValueError(f"ema_alpha must be in (0, 1], got {ema_alpha}")
         self.multiplier = multiplier
+        self.ema_alpha = ema_alpha
         self._prev: Tensor | None = None
         self._buffer: list[Tensor] = []
         self._idx = 0
@@ -73,6 +80,9 @@ class ActionInterpolator:
     @property
     def emitted_policy_action(self) -> bool:
         """Whether the action last returned by :meth:`get` was the policy's own output.
+
+        With ``ema_alpha < 1`` this is the EMA-filtered policy action, i.e. the one
+        actually sent to the robot.
 
         :meth:`add` stores the policy action last in the interpolated buffer, so this
         is ``True`` exactly on the tick that emits ``buffer[-1]`` and ``False`` on the
@@ -103,7 +113,13 @@ class ActionInterpolator:
 
         Args:
             action: New action tensor from policy/queue (already on CPU).
+
+        With ``ema_alpha < 1`` the action is low-pass filtered against the previous
+        (filtered) action first; the filter restarts from the raw action after
+        :meth:`reset`.
         """
+        if self.ema_alpha < 1.0 and self._prev is not None:
+            action = self.ema_alpha * action + (1.0 - self.ema_alpha) * self._prev
         if self.multiplier > 1 and self._prev is not None:
             self._buffer = []
             for i in range(1, self.multiplier):
